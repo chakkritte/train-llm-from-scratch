@@ -4,20 +4,21 @@ import torch.nn.functional as F
 from src.models.transformer_block import Block
 from src.models.rmsnorm import RMSNorm
 from src.models.rope import RotaryEmbedding
+from src.models.moe import MoeLayer
 
 
 class Transformer(nn.Module):
     """
-    Modern decoder-only Transformer (Gemma / Llama 3 style).
+    Modern decoder-only Transformer with optional MoE (Gemma / Llama 3 style).
 
     Features:
     - Rotary Position Embedding (RoPE) inside attention
     - RMSNorm instead of LayerNorm
     - Grouped Query Attention (GQA)
-    - SwiGLU feed-forward network
+    - Optional MoE feed-forward for sparse parameter scaling
     - Optional weight tying between token embeddings and LM head
     - KV-cache support for efficient autoregressive generation
-    - Gradient checkpointing for memory-efficient training of large models
+    - Gradient checkpointing for memory-efficient training
 
     Args:
         vocab_size (int): Vocabulary size.
@@ -29,7 +30,10 @@ class Transformer(nn.Module):
         context_length (int): Maximum sequence length.
         tie_weights (bool): Whether to tie token_embed and lm_head weights.
         rope_theta (float): Base for RoPE frequency computation.
-        use_gradient_checkpointing (bool): Enable gradient checkpointing to trade compute for memory.
+        use_gradient_checkpointing (bool): Enable gradient checkpointing.
+        use_moe (bool): Use Mixture of Experts instead of standard MLP.
+        moe_num_experts (int): Number of experts if MoE is used.
+        moe_top_k (int): Number of active experts per token.
     """
     def __init__(
         self,
@@ -43,6 +47,9 @@ class Transformer(nn.Module):
         tie_weights: bool = True,
         rope_theta: float = 10000.0,
         use_gradient_checkpointing: bool = False,
+        use_moe: bool = False,
+        moe_num_experts: int = 8,
+        moe_top_k: int = 2,
     ) -> None:
         super().__init__()
         self.context_length = context_length
@@ -50,16 +57,31 @@ class Transformer(nn.Module):
         self.n_embed = n_embed
         self.n_layers = n_layers
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.use_moe = use_moe
 
         self.token_embed = nn.Embedding(vocab_size, n_embed)
         self.rope = RotaryEmbedding(n_embed // n_head, max_seq_len=context_length, theta=rope_theta)
 
-        self.blocks = nn.ModuleList(
-            [
-                Block(n_embed, n_head, n_kv_head, intermediate_size, context_length)
-                for _ in range(n_layers)
-            ]
-        )
+        # Build blocks - some with MoE, some with standard MLP
+        # Common pattern: last few layers are MoE, first are dense
+        if use_moe:
+            # Alternate: dense/MoE/dense/MoE for stability
+            self.blocks = nn.ModuleList()
+            for i in range(n_layers):
+                moe_layer = (
+                    MoeLayer(n_embed, num_experts=moe_num_experts, top_k=moe_top_k, hidden_dim=intermediate_size)
+                    if i % 2 == 1 else None
+                )
+                self.blocks.append(
+                    Block(n_embed, n_head, n_kv_head, intermediate_size, context_length, moe=moe_layer)
+                )
+        else:
+            self.blocks = nn.ModuleList(
+                [
+                    Block(n_embed, n_head, n_kv_head, intermediate_size, context_length)
+                    for _ in range(n_layers)
+                ]
+            )
 
         self.norm = RMSNorm(n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size, bias=False)
@@ -96,7 +118,7 @@ class Transformer(nn.Module):
             use_cache (bool): Whether to return updated KV caches.
 
         Returns:
-            tuple: (logits, loss or None, past_key_values or None)
+            tuple: (logits, loss or None, past_key_values or None).
         """
         bsz, seqlen = idx.shape
         h = self.token_embed(idx)
@@ -105,16 +127,20 @@ class Transformer(nn.Module):
         freqs_cis = self.rope(seqlen)
 
         new_past_kvs = []
+        total_aux_loss = 0.0
+
         for i, block in enumerate(self.blocks):
             past_kv = past_key_values[i] if past_key_values is not None else None
             if self.training and self.use_gradient_checkpointing and not use_cache:
-                # Gradient checkpointing: recompute block forward during backward
-                # to save activation memory. Not used with KV-cache (inference).
-                h, kv = torch.utils.checkpoint.checkpoint(
+                h, kv, aux_loss = torch.utils.checkpoint.checkpoint(
                     block, h, freqs_cis, past_kv, use_reentrant=False
                 )
             else:
-                h, kv = block(h, freqs_cis, past_key_value=past_kv)
+                h, kv, aux_loss = block(h, freqs_cis, past_key_value=past_kv)
+
+            if not use_cache and isinstance(aux_loss, torch.Tensor):
+                total_aux_loss += aux_loss
+
             if use_cache:
                 new_past_kvs.append(kv)
 
@@ -124,6 +150,10 @@ class Transformer(nn.Module):
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1).long())
+            # Add MoE load balancing loss if applicable
+            if self.use_moe and isinstance(total_aux_loss, (int, float)) and total_aux_loss != 0.0:
+                # Scale aux_loss down
+                loss = loss + 0.01 * total_aux_loss
             return logits, loss, None
 
         if use_cache:

@@ -1,44 +1,47 @@
-# --- Modern LLM Configuration (~140M parameters, Gemma/Llama 3 style) ---
-# Adjusted for single RTX 5090 32GB with ~1.7M train tokens
+# --- Small Model Configuration (~18M parameters) ---
+# Designed to train well on ~1.7M tokens in 1-2 hours
 
 # Model architecture
-VOCAB_SIZE = 50304          # Number of unique tokens in the vocabulary
-CONTEXT_LENGTH = 2048       # Maximum sequence length for the model
-N_EMBED = 768               # Dimension of the embedding space
-N_LAYERS = 16               # Number of transformer blocks
-N_HEAD = 12                 # Number of query attention heads
-N_KV_HEAD = 3               # Number of key/value heads (GQA; must divide N_HEAD)
-INTERMEDIATE_SIZE = 2048    # SwiGLU FFN hidden dimension (~2.7 * N_EMBED)
-TIE_WEIGHTS = True          # Tie token embeddings with LM head
-ROPE_THETA = 10000.0        # Base for RoPE frequency computation
-USE_GRADIENT_CHECKPOINTING = False  # Not needed for 140M on 32GB
+VOCAB_SIZE = 50304
+CONTEXT_LENGTH = 512
+N_EMBED = 256
+N_LAYERS = 8
+N_HEAD = 8
+N_KV_HEAD = 2
+INTERMEDIATE_SIZE = 704
+TIE_WEIGHTS = True
+ROPE_THETA = 10000.0
+USE_GRADIENT_CHECKPOINTING = False
+USE_MOE = False
+MOE_NUM_EXPERTS = 8
+MOE_TOP_K = 2
 
-# Paths to training and development datasets
+# Paths to datasets
 TRAIN_PATH = "data/train/pile_train.h5"
 DEV_PATH = "data/val/pile_dev.h5"
 
 # Training hyperparameters
-T_BATCH_SIZE = 8            # Micro-batch size per step
-T_CONTEXT_LENGTH = 512      # Context length for training sequences
-T_GRAD_ACCUM = 4            # Gradient accumulation steps (effective batch = 32)
-T_TRAIN_STEPS = 10000       # Total number of training steps (~96 epochs on 1.7M tokens)
-T_WARMUP_STEPS = 500        # Linear warmup steps
-T_EVAL_STEPS = 500          # Evaluate every N steps
-T_EVAL_ITERS = 50           # Number of batches per evaluation
-T_LR = 3e-4                 # Peak learning rate after warmup
-T_MIN_LR = 3e-5             # Minimum learning rate at end of cosine decay
-T_MAX_GRAD_NORM = 1.0       # Gradient clipping threshold
-T_WEIGHT_DECAY = 0.1        # Weight decay for non-bias / non-norm parameters
-T_DTYPE = "fp16"            # Training dtype: "fp16", "bf16", or "fp32"
+T_BATCH_SIZE = 32
+T_CONTEXT_LENGTH = 256
+T_GRAD_ACCUM = 4          # Effective batch = 128
+T_TRAIN_STEPS = 10000     # ~50 epochs on 1.7M tokens
+T_WARMUP_STEPS = 500
+T_EVAL_STEPS = 500
+T_EVAL_ITERS = 50
+T_LR = 5e-4               # Slightly higher LR for small model
+T_MIN_LR = 5e-5
+T_MAX_GRAD_NORM = 1.0
+T_WEIGHT_DECAY = 0.1
+T_DTYPE = "bf16"
 
 # Checkpointing
-T_SAVE_EVERY = 2000         # Save checkpoint every N steps
-T_OUT_PATH = "models/modern_transformer.pt"
+T_SAVE_EVERY = 2000
+T_OUT_PATH = "models/small_transformer.pt"
 
-# Device configuration
+# Device
 DEVICE = "cuda"
 
-# Store all configurations in a dictionary for easy access and modification
+# Config dict
 default_config = {
     "vocab_size": VOCAB_SIZE,
     "context_length": CONTEXT_LENGTH,
@@ -50,6 +53,9 @@ default_config = {
     "tie_weights": TIE_WEIGHTS,
     "rope_theta": ROPE_THETA,
     "use_gradient_checkpointing": USE_GRADIENT_CHECKPOINTING,
+    "use_moe": USE_MOE,
+    "moe_num_experts": MOE_NUM_EXPERTS,
+    "moe_top_k": MOE_TOP_K,
     "train_path": TRAIN_PATH,
     "dev_path": DEV_PATH,
     "t_batch_size": T_BATCH_SIZE,

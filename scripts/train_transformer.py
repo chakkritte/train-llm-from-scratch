@@ -46,13 +46,20 @@ model = Transformer(
     tie_weights=config["tie_weights"],
     rope_theta=config["rope_theta"],
     use_gradient_checkpointing=config.get("use_gradient_checkpointing", False),
+    use_moe=config.get("use_moe", False),
+    moe_num_experts=config.get("moe_num_experts", 8),
+    moe_top_k=config.get("moe_top_k", 2),
 ).to(device)
 
 # torch.compile for 30-80% speedup (PyTorch 2.x)
 if args.compile and hasattr(torch, "compile"):
-    print("Compiling model with torch.compile (this may take a minute)...")
-    model = torch.compile(model, mode="max-autotune")
-    print("Model compiled.")
+    if config.get("use_gradient_checkpointing", False):
+        print("WARNING: torch.compile is incompatible with gradient checkpointing. Disabling compile.")
+        print("         To use compile, set USE_GRADIENT_CHECKPOINTING = False in config.")
+    else:
+        print("Compiling model with torch.compile (this may take a minute)...")
+        model = torch.compile(model, mode="max-autotune")
+        print("Model compiled.")
 
 # Print parameter count
 total_params = sum(p.numel() for p in model.parameters())
