@@ -3,15 +3,9 @@ import torch.nn as nn
 
 class RMSNorm(nn.Module):
     """
-    Root Mean Square Layer Normalization.
+    Root Mean Square Layer Normalization (fast fused version).
 
-    Used in modern LLMs (Gemma, Llama, Qwen, Mistral) instead of standard LayerNorm.
-    Normalizes by the RMS of the input and applies a learnable scale parameter.
-    Does NOT subtract the mean (unlike LayerNorm).
-
-    Args:
-        dim (int): Dimensionality of the input to normalize.
-        eps (float): Small constant for numerical stability. Defaults to 1e-6.
+    Uses rsqrt (fused) instead of sqrt + division for speed.
     """
     def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -20,17 +14,10 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through RMSNorm.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (..., dim).
-
-        Returns:
-            torch.Tensor: Normalized and scaled tensor of the same shape.
+        Forward pass through RMSNorm using rsqrt for speed.
         """
-        # Compute RMS along the last dimension
-        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-        x_norm = x / rms
+        # rsqrt = 1/sqrt(x) is fused and faster than sqrt + divide
+        x_norm = x * torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
         return self.weight * x_norm
 
 if __name__ == '__main__':
@@ -40,5 +27,4 @@ if __name__ == '__main__':
     out = rmsnorm(x)
     print("RMSNorm input shape:", x.shape)
     print("RMSNorm output shape:", out.shape)
-    # Verify that the mean squared is approximately 1
     print("Mean squared of normalized (should be ~1):", torch.mean(out ** 2).item())

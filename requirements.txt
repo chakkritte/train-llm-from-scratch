@@ -1,5 +1,5 @@
 --extra-index-url https://download.pytorch.org/whl/cu118
-torch
+torch>=2.0.0
 torchvision
 torchaudio
 numpy
@@ -8,3 +8,6 @@ requests
 tqdm
 zstandard
 tiktoken
+
+# Optional: install for 8-bit optimizer support (fit larger models on same GPU)
+# pip install bitsandbytes

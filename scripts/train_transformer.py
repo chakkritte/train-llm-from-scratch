@@ -14,17 +14,25 @@ from src.models.transformer import Transformer
 from data_loader.data_loader import get_batch_iterator
 from typing import Dict
 
-# --- Argument parsing for resume ---
+# --- Argument parsing ---
 parser = argparse.ArgumentParser(description="Train a modern decoder-only Transformer.")
 parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from.")
+parser.add_argument("--compile", action="store_true", default=False, help="Compile model with torch.compile for speed.")
+parser.add_argument("--8bit-adam", action="store_true", default=False, help="Use 8-bit AdamW optimizer (bitsandbytes) to fit larger models.")
 args = parser.parse_args()
+
+# Map 8bit_adam to simpler variable name
+args.use_8bit_adam = getattr(args, "8bit_adam", False)
+
+# --- Tensor Cores: enable TF32 for faster matmuls ---
+torch.set_float32_matmul_precision("high")
 
 # --- Device & dtype setup ---
 device = config["device"]
 dtype_str = config["t_dtype"]
 use_amp = dtype_str in ("fp16", "bf16")
 amp_dtype = torch.bfloat16 if dtype_str == "bf16" else torch.float16
-scaler = GradScaler('cuda', enabled=(dtype_str == "fp16"))
+scaler = GradScaler("cuda", enabled=(dtype_str == "fp16"))
 
 # --- Model initialization ---
 model = Transformer(
@@ -40,20 +48,32 @@ model = Transformer(
     use_gradient_checkpointing=config.get("use_gradient_checkpointing", False),
 ).to(device)
 
+# torch.compile for 30-80% speedup (PyTorch 2.x)
+if args.compile and hasattr(torch, "compile"):
+    print("Compiling model with torch.compile (this may take a minute)...")
+    model = torch.compile(model, mode="max-autotune")
+    print("Model compiled.")
+
 # Print parameter count
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Total parameters: {total_params:,}")
 print(f"Trainable parameters: {trainable_params:,}")
 
-# Estimate memory for weights + optimizer states (AdamW = 2x params in FP32)
+# Estimate memory for weights + optimizer states
 weight_mem = total_params * 2  # FP16 weights
-optimizer_mem = total_params * 4 * 2  # FP32 copy + momentum + variance
-print(f"Estimated optimizer memory: ~{optimizer_mem / 1e9:.2f} GB (FP32 Adam states)")
+if args.use_8bit_adam:
+    # 8-bit Adam: ~1.5x params (quantized states)
+    optimizer_mem = total_params * 1.5
+    print("Using 8-bit AdamW optimizer (~1.5x param overhead)")
+else:
+    # Standard FP32 Adam: 2x copy + momentum + variance = 4x
+    optimizer_mem = total_params * 4 * 2
+print(f"Estimated optimizer memory: ~{optimizer_mem / 1e9:.2f} GB")
 print(f"Estimated total minimum memory: ~{(weight_mem + optimizer_mem) / 1e9:.2f} GB")
 
-# --- Optimizer with weight decay filtering ---
-# Do not apply weight decay to bias and normalization parameters
+# --- Optimizer ---
+# Do not apply weight decay to bias, norm, and embedding parameters
 no_decay = set()
 for name, param in model.named_parameters():
     if "bias" in name or "norm" in name or "embed" in name:
@@ -70,9 +90,18 @@ param_groups = [
     },
 ]
 
-optimizer = torch.optim.AdamW(param_groups, lr=config["t_lr"], betas=(0.9, 0.95), eps=1e-8)
+if args.use_8bit_adam:
+    try:
+        import bitsandbytes as bnb
+        optimizer = bnb.optim.AdamW8bit(param_groups, lr=config["t_lr"], betas=(0.9, 0.95), eps=1e-8)
+    except ImportError:
+        print("WARNING: bitsandbytes not installed, falling back to standard AdamW")
+        optimizer = torch.optim.AdamW(param_groups, lr=config["t_lr"], betas=(0.9, 0.95), eps=1e-8, fused=True)
+else:
+    # fused=True uses the CUDA kernel for ~10% speedup
+    optimizer = torch.optim.AdamW(param_groups, lr=config["t_lr"], betas=(0.9, 0.95), eps=1e-8, fused=True)
 
-# --- Learning rate schedule: linear warmup + cosine decay ---
+# --- Learning rate schedule ---
 max_steps = config["t_train_steps"]
 warmup_steps = config["t_warmup_steps"]
 min_lr = config["t_min_lr"]
@@ -129,7 +158,7 @@ def estimate_loss(steps: int) -> Dict[str, float]:
         for k in range(steps):
             try:
                 xb, yb = next(batch_iterator_eval)
-                with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+                with autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                     _, loss, _ = model(xb, targets=yb)
                 losses_eval[k] = loss.item()
             except StopIteration:
@@ -155,7 +184,7 @@ for step in pbar:
     try:
         xb, yb = next(batch_iterator)
 
-        with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+        with autocast("cuda", enabled=use_amp, dtype=amp_dtype):
             _, loss, _ = model(xb, targets=yb)
             loss = loss / grad_accum  # Scale for gradient accumulation
 

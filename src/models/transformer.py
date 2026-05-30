@@ -162,6 +162,13 @@ class Transformer(nn.Module):
                 idx_cond = idx[:, -1:]
                 logits, _, past_kvs = self(idx_cond, past_key_values=past_kvs, use_cache=True)
 
+            # Truncate KV-cache to prevent unbounded growth beyond context_length
+            if past_kvs is not None:
+                past_kvs = [
+                    (k[:, -self.context_length:], v[:, -self.context_length:])
+                    for k, v in past_kvs
+                ]
+
             logits = logits[:, -1, :]
 
             # Greedy decoding
