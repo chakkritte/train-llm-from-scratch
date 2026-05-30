@@ -4,77 +4,46 @@ from torch import Tensor
 
 class MLP(nn.Module):
     """
-    A simple Multi-Layer Perceptron with one hidden layer.
+    SwiGLU feed-forward network used in modern LLMs (Gemma, Llama, Palmyra, Mixtral).
 
-    This module is used within the Transformer block for feed-forward processing.
-    It expands the input embedding size, applies a ReLU activation, and then projects it back
-    to the original embedding size.
+    Replaces the older ReLU-based MLP with a gated activation:
+        hidden = SiLU(gate_proj(x)) * up_proj(x)
+        out = down_proj(hidden)
 
     Args:
-        n_embed (int): The dimensionality of the input embedding.
+        n_embed (int): Input/output embedding dimension.
+        intermediate_size (int): Hidden dimension of the FFN (typically ~2.7× n_embed).
     """
-    def __init__(self, n_embed: int) -> None:
-        """
-        Initializes the MLP module.
-
-        Args:
-            n_embed (int): The dimensionality of the input embedding.
-        """
+    def __init__(self, n_embed: int, intermediate_size: int) -> None:
         super().__init__()
-        self.hidden = nn.Linear(n_embed, 4 * n_embed)  # Linear layer to expand embedding size
-        self.relu = nn.ReLU()                        # ReLU activation function
-        self.proj = nn.Linear(4 * n_embed, n_embed)  # Linear layer to project back to original size
+        self.gate_proj = nn.Linear(n_embed, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(n_embed, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, n_embed, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
         """
-        Forward pass through the MLP.
+        Forward pass through SwiGLU MLP.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (B, T, C), where B is batch size,
-                              T is sequence length, and C is embedding size.
+            x (torch.Tensor): Input of shape (B, T, n_embed).
 
         Returns:
-            torch.Tensor: Output tensor of the same shape as the input.
+            torch.Tensor: Output of shape (B, T, n_embed).
         """
-        x = self.forward_embedding(x)
-        x = self.project_embedding(x)
-        return x
+        gate = torch.nn.functional.silu(self.gate_proj(x))
+        up = self.up_proj(x)
+        hidden = gate * up
+        return self.down_proj(hidden)
 
-    def forward_embedding(self, x: Tensor) -> Tensor:
-        """
-        Applies the hidden linear layer followed by ReLU activation.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output after the hidden layer and ReLU.
-        """
-        x = self.relu(self.hidden(x))
-        return x
-
-    def project_embedding(self, x: Tensor) -> Tensor:
-        """
-        Applies the projection linear layer.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output after the projection layer.
-        """
-        x = self.proj(x)
-        return x
 
 if __name__ == '__main__':
-    # Example Usage (optional, for testing the module independently)
-    batch_size = 2
-    sequence_length = 3
-    embedding_dim = 16
-    input_tensor = torch.randn(batch_size, sequence_length, embedding_dim)
+    batch = 2
+    seq_len = 5
+    n_embed = 512
+    intermediate = 1408  # ~2.75×
 
-    mlp_module = MLP(n_embed=embedding_dim)
-    output_tensor = mlp_module(input_tensor)
-
-    print("MLP Input Shape:", input_tensor.shape)
-    print("MLP Output Shape:", output_tensor.shape)
+    x = torch.randn(batch, seq_len, n_embed)
+    mlp = MLP(n_embed, intermediate)
+    out = mlp(x)
+    print("SwiGLU MLP input shape:", x.shape)
+    print("SwiGLU MLP output shape:", out.shape)

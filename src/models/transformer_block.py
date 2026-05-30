@@ -1,76 +1,85 @@
 import torch
 import torch.nn as nn
-from src.models.attention import MultiHeadAttention
+from src.models.attention import Attention
 from src.models.mlp import MLP
+from src.models.rmsnorm import RMSNorm
+
 
 class Block(nn.Module):
     """
-    A single Transformer block.
+    A single modern Transformer block with pre-RMSNorm, GQA, and SwiGLU.
 
-    This block consists of a multi-head attention layer followed by an MLP,
-    with layer normalization and residual connections.
+    Architecture (Gemma / Llama 3 style):
+        x = x + Attention(RMSNorm1(x))
+        x = x + MLP(RMSNorm2(x))
 
     Args:
-        n_head (int): The number of attention heads in the multi-head attention layer.
-        n_embed (int): The dimensionality of the input embedding.
-        context_length (int): The maximum length of the input sequence.
+        n_embed (int): Embedding dimension.
+        n_head (int): Number of query attention heads.
+        n_kv_head (int): Number of key/value heads.
+        intermediate_size (int): FFN hidden dimension.
+        context_length (int): Maximum sequence length.
     """
-    def __init__(self, n_head: int, n_embed: int, context_length: int) -> None:
-        """
-        Initializes the Transformer block.
-
-        Args:
-            n_head (int): The number of attention heads.
-            n_embed (int): The dimensionality of the embedding space.
-            context_length (int): The maximum sequence length.
-        """
+    def __init__(
+        self,
+        n_embed: int,
+        n_head: int,
+        n_kv_head: int,
+        intermediate_size: int,
+        context_length: int,
+    ) -> None:
         super().__init__()
-        self.ln1 = nn.LayerNorm(n_embed)
-        self.attn = MultiHeadAttention(n_head, n_embed, context_length)
-        self.ln2 = nn.LayerNorm(n_embed)
-        self.mlp = MLP(n_embed)
+        self.attn_norm = RMSNorm(n_embed)
+        self.attn = Attention(n_embed, n_head, n_kv_head, context_length)
+        self.mlp_norm = RMSNorm(n_embed)
+        self.mlp = MLP(n_embed, intermediate_size)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """
-        Forward pass through the Transformer block.
+        Forward pass through the block.
 
         Args:
-            x (torch.Tensor): Input tensor.
+            x (torch.Tensor): Input of shape (B, T, C).
+            freqs_cis (torch.Tensor): RoPE frequencies for the current sequence length.
+            past_key_value (tuple, optional): Cached KV from previous generation steps.
 
         Returns:
-            torch.Tensor: Output tensor after the block.
+            tuple: (output tensor, updated KV cache).
         """
-        # Apply multi-head attention with residual connection
-        x = x + self.attn(self.ln1(x))
-        # Apply MLP with residual connection
-        x = x + self.mlp(self.ln2(x))
-        return x
+        attn_out, kv = self.attn(self.attn_norm(x), freqs_cis, past_key_value)
+        x = x + attn_out
+        x = x + self.mlp(self.mlp_norm(x))
+        return x, kv
 
-    def forward_embedding(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass focusing on the embedding and attention parts.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            tuple: A tuple containing the output after MLP embedding and the residual.
-        """
-        res = x + self.attn(self.ln1(x))
-        x = self.mlp.forward_embedding(self.ln2(res))
-        return x, res
 
 if __name__ == '__main__':
-    # Example Usage (optional, for testing the module independently)
-    batch_size = 2
-    sequence_length = 5
-    embedding_dim = 32
-    num_heads = 4
-    context_len = 5
-    input_tensor = torch.randn(batch_size, sequence_length, embedding_dim)
+    batch = 2
+    seq_len = 8
+    n_embed = 512
+    n_head = 8
+    n_kv_head = 2
+    intermediate = 1408
+    context_len = 16
+    head_dim = n_embed // n_head
 
-    transformer_block = Block(n_head=num_heads, n_embed=embedding_dim, context_length=context_len)
-    output_tensor = transformer_block(input_tensor)
+    x = torch.randn(batch, seq_len, n_embed)
+    freqs_cis = torch.polar(
+        torch.ones(seq_len, head_dim // 2),
+        torch.randn(seq_len, head_dim // 2),
+    )
 
-    print("Transformer Block Input Shape:", input_tensor.shape)
-    print("Transformer Block Output Shape:", output_tensor.shape)
+    block = Block(n_embed, n_head, n_kv_head, intermediate, context_len)
+    out, kv = block(x, freqs_cis)
+    print("Block input shape:", x.shape)
+    print("Block output shape:", out.shape)
+
+    # Test KV-cache continuation
+    x2 = torch.randn(batch, 1, n_embed)
+    freqs_cis2 = torch.polar(torch.ones(1, head_dim // 2), torch.randn(1, head_dim // 2))
+    out2, kv2 = block(x2, freqs_cis2, past_key_value=kv)
+    print("Cached block output shape:", out2.shape)
