@@ -76,7 +76,11 @@ python scripts/data_download.py --train_max 1
 ### 3. Preprocess Data
 
 ```bash
+# Quick test (~1000 lines, ~1.7M tokens, runs in seconds)
 python scripts/data_preprocess.py --max_data 1000
+
+# Full preprocessing (all available lines, ~100M+ tokens, takes longer)
+python scripts/data_preprocess.py
 ```
 
 ### 4. Train
@@ -108,21 +112,23 @@ python scripts/generate_text.py \
 
 ## Configuration
 
-Key parameters in `config/config.py`:
+Key parameters in `config/config.py`. Defaults below are tuned for a **~140M parameter** model on a single **RTX 5090 32GB** with ~1.7M preprocessed tokens. Scale up/down as your data and GPU allow:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `VOCAB_SIZE` | 50304 | Vocabulary size |
 | `CONTEXT_LENGTH` | 2048 | Max sequence length |
-| `N_EMBED` | 2560 | Embedding dimension |
-| `N_LAYERS` | 24 | Number of transformer blocks |
-| `N_HEAD` | 20 | Number of query heads |
-| `N_KV_HEAD` | 4 | Number of key/value heads (GQA) |
-| `INTERMEDIATE_SIZE` | 7040 | SwiGLU hidden dimension |
-| `T_BATCH_SIZE` | 16 | Micro-batch size |
+| `N_EMBED` | 768 | Embedding dimension |
+| `N_LAYERS` | 16 | Number of transformer blocks |
+| `N_HEAD` | 12 | Number of query heads |
+| `N_KV_HEAD` | 3 | Number of key/value heads (GQA) |
+| `INTERMEDIATE_SIZE` | 2048 | SwiGLU hidden dimension |
+| `T_BATCH_SIZE` | 8 | Micro-batch size |
 | `T_GRAD_ACCUM` | 4 | Gradient accumulation steps |
 | `T_LR` | 3e-4 | Peak learning rate |
 | `T_DTYPE` | fp16 | Training dtype: fp16, bf16, or fp32 |
+
+> **Rule of thumb:** A model with `N` parameters needs at least `10N`–`20N` tokens to learn coherent language. With only ~1.7M tokens, the ~140M model will underfit. For better generation quality, either **(a)** preprocess the full PILE shard (remove `--max_data 1000` to get 100M+ tokens), or **(b)** shrink the model to ~10–20M parameters.
 
 ---
 
@@ -134,6 +140,7 @@ Key parameters in `config/config.py`:
 - **Cosine LR Decay with Warmup** — stable training dynamics
 - **Weight Decay Filtering** — no decay on bias, norm, and embedding parameters
 - **Automatic Checkpointing** — saves every `N` steps + final model
+- **Resume Support** — continue training from any checkpoint (`--resume`)
 
 ---
 
