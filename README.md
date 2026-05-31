@@ -41,14 +41,20 @@ train-llm-from-scratch/
 │   ├── mlp.py                    # SwiGLU feed-forward
 │   ├── transformer_block.py      # Single transformer block
 │   ├── rmsnorm.py                # RMSNorm layer
-│   └── rope.py                   # Rotary Position Embedding
+│   ├── rope.py                   # Rotary Position Embedding
+│   ├── moe.py                    # Mixture of Experts layer
+│   ├── flat_loader.py            # Zero-overhead flat weight loader
+│   └── fast_inference.py         # Compiled inference engine
 ├── data_loader/
 │   └── data_loader.py            # HDF5 batch iterator
 ├── scripts/
 │   ├── data_download.py          # Download PILE dataset
 │   ├── data_preprocess.py        # Tokenize & save to HDF5
 │   ├── train_transformer.py      # Training loop with AMP & resume
-│   └── generate_text.py          # Text generation
+│   ├── generate_text.py          # Text generation
+│   ├── export_flat_weights.py    # Export checkpoint to raw binary arrays
+│   ├── run_fast_inference.py     # High-performance inference runner
+│   └── benchmark_inference.py    # Layer-wise benchmarks + correctness tests
 ├── data/                         # Dataset storage
 └── models/                       # Saved checkpoints
 ```
@@ -115,6 +121,44 @@ python scripts/generate_text.py \
   --max_new_tokens 100 \
   --temperature 0.8 \
   --top_k 40
+```
+
+---
+
+### 6. High-Performance Inference (Flat Weights + Compiled Engine)
+
+Inspired by custom C++/CUDA inference stacks, this repo includes a **fast inference pipeline** that:
+
+- **Exports weights to flat binary arrays** — bypasses PyTorch pickle overhead for instant, memory-mapped loading.
+- **`torch.compile`-es the single-token forward pass** — lets PyTorch 2.x generate fused CUDA kernels automatically (the Python-native equivalent of hand-written kernels).
+- **Benchmarks every layer independently** — correctness checks + latency benchmarks for embeddings, attention, MLP, and end-to-end generation.
+
+#### Export flat weights
+
+```bash
+python scripts/export_flat_weights.py \
+  --checkpoint models/modern_transformer.pt \
+  --out_dir models/modern_transformer_flat/ \
+  --fp16               # optional: store as FP16 for smaller disk footprint
+```
+
+#### Run fast inference
+
+```bash
+python scripts/run_fast_inference.py \
+  --flat_dir models/modern_transformer_flat/ \
+  --input_text "The future of AI is" \
+  --max_new_tokens 100
+```
+
+#### Benchmark & verify correctness
+
+```bash
+# Benchmark each layer and compare flat-weight / compiled engine against baseline
+python scripts/benchmark_inference.py \
+  --model_path models/modern_transformer.pt \
+  --flat_dir models/modern_transformer_flat/ \
+  --max_new_tokens 50
 ```
 
 ---
